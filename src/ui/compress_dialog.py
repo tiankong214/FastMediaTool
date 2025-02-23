@@ -1,61 +1,119 @@
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QLabel, QPushButton, 
-                            QFileDialog, QProgressBar, QComboBox, QHBoxLayout, QLineEdit, QMessageBox, QFrame, QWidget)
-from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer, QDateTime
+                            QFileDialog, QProgressBar, QComboBox, QHBoxLayout, QLineEdit, QMessageBox, QFrame, QWidget, QApplication)
+from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer, QDateTime, QProcess
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QImage, QPixmap, QMouseEvent
 import os
 from video_tools.compressor import VideoCompressor
 import cv2
 from .video_preview import VideoPreview
+from .log_widget import LogWidget
+import re
+import time
 
 class CompressWorker(QThread):
-    progress = pyqtSignal(int)
-    finished = pyqtSignal(bool, str)
+    progress_updated = pyqtSignal(int)
+    finished = pyqtSignal(bool, str, float)
     
     def __init__(self, input_path, output_path, resolution):
         super().__init__()
         self.input_path = input_path
         self.output_path = output_path
         self.resolution = resolution
-        self.process = None
         self.is_cancelled = False
+        self.process = None
+        self.duration = None
+        self.start_time = None
     
     def run(self):
         try:
-            def progress_callback(p):
-                if self.is_cancelled:
-                    return False  # 通知压缩器停止处理
-                self.progress.emit(p)
-                return True
+            self.start_time = time.time()  # 记录开始时间
+            output_resolution = VideoCompressor.parse_resolution(self.resolution)
             
-            success = VideoCompressor.compress_video(
-                self.input_path,
-                self.output_path,
-                self.resolution,
-                progress_callback,
-                self  # 传递worker实例以便设置process
-            )
-            if self.is_cancelled:
-                self.finished.emit(False, "已取消压缩")
-                return
-            self.finished.emit(success, self.output_path if success else "压缩失败")
+            # 构建FFmpeg命令
+            command = [
+                'ffmpeg', '-y',
+                '-hide_banner',
+                '-loglevel', 'info',
+                '-i', self.input_path,
+                '-c:v', 'h264_nvenc' if VideoCompressor.has_nvidia_gpu() else 'libx264',
+                '-preset', 'p4' if VideoCompressor.has_nvidia_gpu() else 'fast',
+                '-crf', '23',
+                '-b:v', '0',
+                '-c:a', 'aac',
+                '-b:a', '192k',
+                '-movflags', '+faststart',
+            ]
+            
+            if output_resolution:
+                command.extend([
+                    '-vf', f'scale={output_resolution[0]}:{output_resolution[1]}'
+                ])
+            
+            command.append(self.output_path)
+            
+            # 创建 QProcess
+            self.process = QProcess()
+            self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+            self.process.readyReadStandardOutput.connect(self.handle_output)
+            self.process.finished.connect(self.handle_finished)
+            
+            # 启动进程
+            self.process.start(command[0], command[1:])
+            
+            # 等待进程完成
+            self.process.waitForFinished(-1)
+            
         except Exception as e:
-            self.finished.emit(False, str(e))
-
-    def terminate(self):
-        """终止压缩进程"""
+            self.finished.emit(False, str(e), 0)
+    
+    def handle_output(self):
+        """处理FFmpeg输出"""
+        try:
+            data = self.process.readAllStandardOutput().data().decode('utf-8', errors='replace')
+            for line in data.splitlines():
+                # 解析时长信息
+                if not self.duration and "Duration:" in line:
+                    duration_match = re.search(r"Duration: (\d{2}):(\d{2}):(\d{2})", line)
+                    if duration_match:
+                        h, m, s = map(int, duration_match.groups())
+                        self.duration = h * 3600 + m * 60 + s
+                
+                # 解析进度信息
+                time_match = re.search(r"time=(\d{2}):(\d{2}):(\d{2})", line)
+                if time_match and self.duration:
+                    h, m, s = map(int, time_match.groups())
+                    time_processed = h * 3600 + m * 60 + s
+                    progress = int((time_processed / self.duration) * 100)
+                    self.progress_updated.emit(progress)
+                    
+        except Exception as e:
+            print(f"处理输出错误: {str(e)}")
+    
+    def handle_finished(self, exit_code, exit_status):
+        """处理进程完成"""
+        elapsed_time = time.time() - self.start_time  # 计算用时
+        if self.is_cancelled:
+            self.finished.emit(False, "已取消压缩", elapsed_time)
+        elif exit_code == 0:
+            self.finished.emit(True, "", elapsed_time)
+        else:
+            self.finished.emit(False, f"FFmpeg处理失败 (退出码: {exit_code})", elapsed_time)
+    
+    def cancel(self):
+        """取消压缩"""
         self.is_cancelled = True
-        if self.process:
-            print("正在终止FFmpeg进程...")
-            self.process.terminate()
-            self.process.wait()  # 等待进程完全终止
-            print("FFmpeg进程已终止")
-        super().terminate()
+        if self.process and self.process.state() != QProcess.ProcessState.NotRunning:
+            self.process.kill()
 
 class CompressDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("视频压缩 - 音视频处理工作台")
+        self.setWindowTitle("音视频处理工作台 - 视频压缩")  # 修改标题顺序
         self.setMinimumSize(800, 450)  # 再减小50px
+        
+        # 设置窗口图标
+        if QApplication.instance().windowIcon():
+            self.setWindowIcon(QApplication.instance().windowIcon())
         
         # 添加进程变量
         self.process = None
@@ -115,6 +173,13 @@ class CompressDialog(QDialog):
         # 将内容布局添加到主布局
         layout.addLayout(content_layout)
         
+        # 添加日志组件
+        self.log_widget = LogWidget()
+        layout.addWidget(self.log_widget)
+        
+        # 调整日志组件高度
+        self.log_widget.setFixedHeight(150)
+        
         # 进度条和设置区域使用更紧凑的布局
         settings_container = QWidget()
         settings_container_layout = QVBoxLayout(settings_container)
@@ -141,18 +206,22 @@ class CompressDialog(QDialog):
         """)
         settings_container_layout.addWidget(self.progress)
         
-        # 输出目录
+        # 输出目录选择
         output_dir_layout = QHBoxLayout()
-        output_dir_layout.setSpacing(5)
+        output_dir_layout.setSpacing(4)
+        
         self.output_dir_edit = QLineEdit()
-        self.output_dir_edit.setReadOnly(True)
-        self.output_dir_edit.setPlaceholderText("请先选择视频文件")
-        self.output_dir_button = QPushButton("浏览")
+        self.output_dir_edit.setPlaceholderText("请选择输出目录...")
+        self.output_dir_edit.setText("")  # 确保初始为空
+        
+        self.output_dir_button = QPushButton("选择目录")
         self.output_dir_button.clicked.connect(self.select_output_dir)
-        self.output_dir_button.setEnabled(False)  # 初始状态禁用
-        output_dir_layout.addWidget(QLabel("输出目录："))
+        self.output_dir_button.setEnabled(True)  # 始终启用目录选择按钮
+        
+        output_dir_layout.addWidget(QLabel("输出目录:"))
         output_dir_layout.addWidget(self.output_dir_edit)
         output_dir_layout.addWidget(self.output_dir_button)
+        
         settings_container_layout.addLayout(output_dir_layout)
         
         # 分辨率和格式设置
@@ -234,7 +303,7 @@ class CompressDialog(QDialog):
         layout.addLayout(button_layout)
         
         # 连接信号
-        self.start_button.clicked.connect(self.start_compress)
+        self.start_button.clicked.connect(self.start_compression)
         self.cancel_button.clicked.connect(self.cancel_compress)
         self.back_button.clicked.connect(self.reject)  # 关闭对话框
         self.preview.preview_label.click_handler = self.select_file
@@ -243,7 +312,7 @@ class CompressDialog(QDialog):
         self.setAcceptDrops(True)
         
         self.current_file = None
-        self.worker = None
+        self.compress_worker = None
     
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
@@ -258,185 +327,299 @@ class CompressDialog(QDialog):
     
     def select_file(self, event):
         """选择视频文件"""
-        file_path, _ = QFileDialog.getOpenFileName(
+        dialog = QFileDialog(
             self,
             "选择视频文件",
             "",
             "所有视频文件 (*.mp4 *.avi *.mkv *.mov *.wmv *.flv *.webm *.m4v *.3gp *.ts *.mts *.m2ts *.vob);;所有文件 (*.*)"
         )
-        if file_path:
+        # 设置对话框大小
+        dialog.resize(600, 400)
+        
+        # 设置中文按钮文本
+        dialog.setLabelText(QFileDialog.DialogLabel.Accept, "选择")
+        dialog.setLabelText(QFileDialog.DialogLabel.Reject, "取消")
+        dialog.setLabelText(QFileDialog.DialogLabel.LookIn, "查看")
+        dialog.setLabelText(QFileDialog.DialogLabel.FileName, "文件名")
+        dialog.setLabelText(QFileDialog.DialogLabel.FileType, "文件类型")
+        
+        if dialog.exec():
+            file_path = dialog.selectedFiles()[0]
             self.process_video_file(file_path)
     
     def process_video_file(self, file_path):
         """处理视频文件"""
         try:
-            self.current_file = file_path
+            # 验证文件
+            if not os.path.exists(file_path):
+                raise FileNotFoundError("文件不存在")
+            
+            # 获取视频信息
             info = VideoCompressor.get_video_info(file_path)
             
-            # 加载视频预览
+            # 更新UI
+            self.current_file = file_path
             self.preview.load_video(file_path)
             
-            # 格式化时间
-            minutes = int(info['duration'] // 60)
-            seconds = int(info['duration'] % 60)
+            # 更新原始文件信息
+            file_size = os.path.getsize(file_path) / (1024 * 1024)  # 转换为MB
+            duration = int(info['duration'])
+            hours = duration // 3600
+            minutes = (duration % 3600) // 60
+            seconds = duration % 60
             
-            self.original_info_label.setText(
-                f"原始文件信息：\n"
-                f"路径：{file_path}\n"
+            info_text = (
+                f"原始文件信息：\n\n"
                 f"分辨率：{info['width']}x{info['height']}\n"
-                f"时长：{minutes:02d}:{seconds:02d}\n"
-                f"大小：{info['size']:.2f}MB"
+                f"时长：{hours:02d}:{minutes:02d}:{seconds:02d}\n"
+                f"大小：{file_size:.1f}MB\n"
+                f"格式：{info['format']}"
             )
+            self.original_info_label.setText(info_text)
             
-            # 重置压缩信息
-            self.compressed_info_label.setText("压缩文件信息：\n\n等待压缩...")
-            
-            # 设置默认输出文件名（总是使用.mp4扩展名）
-            video_dir = os.path.dirname(file_path)
-            video_name = os.path.splitext(os.path.basename(file_path))[0]
-            default_output = os.path.join(video_dir, f"{video_name}_compressed.mp4")
-            self.output_dir_edit.setText(default_output)
-            
-            # 启用相关控件
-            self.output_dir_button.setEnabled(True)
+            # 启用开始按钮
             self.start_button.setEnabled(True)
             
+            # 记录日志
+            self.log_widget.log(f"已选择文件：{file_path}")
+            
         except Exception as e:
-            self.original_info_label.setText(f"错误：无法读取文件信息\n{str(e)}")
+            self.show_error_message(f"处理文件失败：{str(e)}")
+            self.current_file = None
             self.start_button.setEnabled(False)
-            self.output_dir_edit.clear()
     
     def select_output_dir(self):
-        dir_path = QFileDialog.getExistingDirectory(
-            self,
-            "选择输出目录",
-            "",
-            QFileDialog.Option.ShowDirsOnly
-        )
-        if dir_path:
-            self.output_dir_edit.setText(dir_path)
-    
-    def start_compress(self):
-        if not self.current_file:
-            return
-        
-        # 检查输出目录
-        output_dir = self.output_dir_edit.text()
-        if not output_dir:
-            QMessageBox.warning(self, "警告", "请选择输出目录")
-            return
-        
-        # 获取保存路径
-        file_name = os.path.splitext(os.path.basename(self.current_file))[0]
-        # 使用原文件名
-        output_filename = f"{file_name}.mp4"
-        output_path = os.path.join(output_dir, output_filename)
-        
-        # 检查文件是否已存在
-        if os.path.exists(output_path):
-            reply = QMessageBox.question(
+        """选择输出目录"""
+        try:
+            # 获取初始目录
+            initial_dir = ""
+            if self.current_file:
+                initial_dir = os.path.dirname(self.current_file)
+            elif self.output_dir_edit.text():
+                initial_dir = self.output_dir_edit.text()
+            
+            # 创建目录选择对话框
+            dialog = QFileDialog(
                 self,
-                "文件已存在",
-                "输出文件已存在，是否覆盖？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
+                "选择输出目录",
+                initial_dir
             )
-            if reply == QMessageBox.StandardButton.No:
+            dialog.setFileMode(QFileDialog.FileMode.Directory)
+            dialog.setOption(QFileDialog.Option.ShowDirsOnly)
+            
+            # 设置对话框大小
+            dialog.resize(500, 400)  # 设置更小的尺寸
+            
+            # 设置中文按钮文本
+            dialog.setLabelText(QFileDialog.DialogLabel.Accept, "选择")
+            dialog.setLabelText(QFileDialog.DialogLabel.Reject, "取消")
+            dialog.setLabelText(QFileDialog.DialogLabel.LookIn, "位置")
+            dialog.setLabelText(QFileDialog.DialogLabel.FileName, "文件名")
+            dialog.setLabelText(QFileDialog.DialogLabel.FileType, "文件类型")
+            
+            if dialog.exec():
+                dir_path = dialog.selectedFiles()[0]
+                # 规范化路径
+                dir_path = os.path.normpath(dir_path)
+                self.output_dir_edit.setText(dir_path)
+                self.log_widget.log(f"已选择输出目录：{dir_path}")
+                
+        except Exception as e:
+            self.show_error_message(f"选择输出目录失败：{str(e)}")
+    
+    def start_compression(self):
+        """开始压缩"""
+        try:
+            if not self.current_file:
+                QMessageBox.warning(
+                    self,
+                    "提示",
+                    "请先选择视频文件",
+                    QMessageBox.StandardButton.Ok
+                )
                 return
-        
-        # 开始压缩
-        self.progress.setValue(0)  # 重置进度条
-        self.progress.setVisible(True)  # 确保进度条可见
-        self.start_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)  # 确保取消按钮可用
-        
-        self.worker = CompressWorker(
-            self.current_file,
-            output_path,
-            self.resolution_combo.currentText()
-        )
-        self.worker.progress.connect(self.update_progress)
-        self.worker.finished.connect(self.compression_finished)
-        self.worker.start()
+            
+            # 检查输出目录
+            output_dir = self.output_dir_edit.text()
+            if not output_dir:
+                # 弹窗提示用户选择输出目录
+                QMessageBox.warning(
+                    self,
+                    "提示",
+                    "请选择输出目录",
+                    QMessageBox.StandardButton.Ok
+                )
+                # 打开目录选择对话框
+                dialog = QFileDialog(
+                    self,
+                    "选择输出目录",
+                    os.path.dirname(self.current_file)
+                )
+                dialog.setFileMode(QFileDialog.FileMode.Directory)
+                dialog.setOption(QFileDialog.Option.ShowDirsOnly)
+                
+                # 设置对话框大小
+                dialog.resize(500, 400)
+                
+                # 设置中文按钮文本
+                dialog.setLabelText(QFileDialog.DialogLabel.Accept, "选择")
+                dialog.setLabelText(QFileDialog.DialogLabel.Reject, "取消")
+                dialog.setLabelText(QFileDialog.DialogLabel.LookIn, "位置")
+                dialog.setLabelText(QFileDialog.DialogLabel.FileName, "文件名")
+                dialog.setLabelText(QFileDialog.DialogLabel.FileType, "文件类型")
+                
+                if dialog.exec():
+                    output_dir = dialog.selectedFiles()[0]
+                else:
+                    return
+            
+            # 检查输出目录是否与输入目录相同
+            input_dir = os.path.dirname(os.path.abspath(self.current_file))
+            output_dir = os.path.abspath(output_dir)
+            
+            if input_dir == output_dir:
+                QMessageBox.warning(
+                    self,
+                    "提示",
+                    "输出目录不能与原视频目录相同，请选择其他目录",
+                    QMessageBox.StandardButton.Ok
+                )
+                return
+            
+            self.output_dir_edit.setText(output_dir)
+            
+            # 准备输出文件路径（使用与输入文件相同的名称）
+            input_filename = os.path.basename(self.current_file)
+            base_name = os.path.splitext(input_filename)[0]
+            output_path = os.path.join(output_dir, base_name + '.mp4')
+            
+            # 检查文件是否已存在
+            if os.path.exists(output_path):
+                msg_box = QMessageBox(
+                    QMessageBox.Icon.Question,
+                    "确认覆盖",
+                    f"文件 {os.path.basename(output_path)} 已存在，是否覆盖？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    self
+                )
+                msg_box.setDefaultButton(QMessageBox.StandardButton.No)
+                
+                # 设置按钮文本
+                yes_button = msg_box.button(QMessageBox.StandardButton.Yes)
+                no_button = msg_box.button(QMessageBox.StandardButton.No)
+                yes_button.setText("是")
+                no_button.setText("否")
+                
+                reply = msg_box.exec()
+                
+                if reply == QMessageBox.StandardButton.No:
+                    self.log_widget.log("用户取消覆盖文件，压缩已取消", "INFO")
+                    return
+                
+                self.log_widget.log("用户选择覆盖现有文件", "INFO")
+            
+            # 记录日志
+            self.log_widget.log(f"输入文件：{self.current_file}")
+            self.log_widget.log(f"输出目录：{output_dir}")
+            self.log_widget.log(f"输出文件：{output_path}")
+            
+            # 禁用开始按钮，启用取消按钮
+            self.start_button.setEnabled(False)
+            self.cancel_button.setEnabled(True)
+            
+            # 创建并启动工作线程
+            self.compress_worker = CompressWorker(
+                self.current_file,
+                output_path,
+                self.resolution_combo.currentText()
+            )
+            self.compress_worker.progress_updated.connect(self.update_progress)
+            self.compress_worker.finished.connect(self.compression_finished)
+            self.compress_worker.start()
+            
+        except Exception as e:
+            self.show_error_message(f"压缩失败：{str(e)}")
     
     def update_progress(self, value):
-        # 确保进度值在有效范围内
-        value = max(0, min(value, 100))
         self.progress.setValue(value)
-        # 强制更新UI
-        self.progress.repaint()
+        self.log_widget.log(f"压缩进度：{value}%", "DEBUG")
     
-    def compression_finished(self, success, message):
-        self.start_button.setEnabled(True)
-        self.cancel_button.setEnabled(True)
-        
-        if success:
-            try:
-                # 获取原始文件信息
-                original_info = VideoCompressor.get_video_info(self.current_file)
-                # 获取压缩后文件信息
-                compressed_info = VideoCompressor.get_video_info(message)
+    def compression_finished(self, success, error_message, elapsed_time):
+        """压缩完成的回调"""
+        try:
+            # 获取输出路径（在重置 worker 之前）
+            output_path = self.compress_worker.output_path
+            
+            # 重置工作线程
+            self.compress_worker = None
+            
+            # 恢复按钮状态
+            self.start_button.setEnabled(True)
+            self.cancel_button.setEnabled(False)
+            
+            if success:
+                try:
+                    # 获取压缩后的文件信息
+                    compressed_info = VideoCompressor.get_video_info(output_path)
+                    
+                    # 格式化文件大小
+                    original_size = os.path.getsize(self.current_file) / (1024 * 1024)
+                    compressed_size = compressed_info['size']
+                    reduction = ((original_size - compressed_size) / original_size) * 100
+                    
+                    # 格式化时长
+                    duration = int(compressed_info['duration'])
+                    hours = duration // 3600
+                    minutes = (duration % 3600) // 60
+                    seconds = duration % 60
+                    
+                    # 格式化用时
+                    minutes = int(elapsed_time // 60)
+                    seconds = int(elapsed_time % 60)
+                    
+                    # 更新压缩信息标签
+                    info_text = (
+                        f"压缩文件信息：\n\n"
+                        f"分辨率：{compressed_info['width']}x{compressed_info['height']}\n"
+                        f"时长：{hours:02d}:{minutes:02d}:{seconds:02d}\n"
+                        f"大小：{compressed_size:.1f}MB (减小了{reduction:.1f}%)\n"
+                        f"格式：{compressed_info['format']}\n"
+                        f"\n压缩完成！用时：{minutes}分{seconds}秒"
+                    )
+                    self.compressed_info_label.setText(info_text)
+                    self.show_success_message(elapsed_time)
+                    
+                except Exception as e:
+                    self.show_error_message(f"获取压缩文件信息失败：{str(e)}")
+            else:
+                self.show_error_message(f"压缩失败：{error_message}")
+                self.compressed_info_label.setText("压缩失败，请查看错误信息")
                 
-                # 计算压缩比率
-                compression_ratio = round((1 - compressed_info['size'] / original_info['size']) * 100, 2)
-                
-                # 格式化时间
-                original_minutes = int(original_info['duration'] // 60)
-                original_seconds = int(original_info['duration'] % 60)
-                compressed_minutes = int(compressed_info['duration'] // 60)
-                compressed_seconds = int(compressed_info['duration'] % 60)
-                
-                # 更新信息显示
-                self.original_info_label.setText(
-                    f"原始文件信息：\n\n"
-                    f"路径：{self.current_file}\n"
-                    f"分辨率：{original_info['width']}x{original_info['height']}\n"
-                    f"时长：{original_minutes:02d}:{original_seconds:02d}\n"
-                    f"大小：{original_info['size']:.2f}MB"
-                )
-                
-                self.compressed_info_label.setText(
-                    f"压缩后文件信息：\n\n"
-                    f"路径：{message}\n"
-                    f"分辨率：{compressed_info['width']}x{compressed_info['height']}\n"
-                    f"时长：{compressed_minutes:02d}:{compressed_seconds:02d}\n"
-                    f"大小：{compressed_info['size']:.2f}MB\n"
-                    f"压缩比率：{compression_ratio}%\n"
-                    f"\n✅ 压缩完成！"
-                )
-            except Exception as e:
-                self.compressed_info_label.setText(f"压缩完成，但无法获取详细信息：{str(e)}")
-            self.progress.setValue(100)  # 确保进度条显示完成
-        else:
-            self.compressed_info_label.setText(f"压缩失败：{message}")
-        
-        # 延迟一段时间后隐藏进度条
-        QTimer.singleShot(3000, lambda: self.progress.setValue(0))
+        except Exception as e:
+            self.show_error_message(f"处理压缩结果失败：{str(e)}")
+    
+    def show_success_message(self, elapsed_time):
+        minutes = int(elapsed_time // 60)
+        seconds = int(elapsed_time % 60)
+        self.log_widget.log(f"压缩完成！用时：{minutes}分{seconds}秒", "INFO")
+    
+    def show_error_message(self, message):
+        self.log_widget.log(message, "ERROR")
+        self.compressed_info_label.setText(message)
     
     def cancel_compress(self):
         """取消压缩"""
-        if self.worker and self.worker.isRunning():
-            print("正在取消压缩...")
-            self.cancel_button.setEnabled(False)  # 防止重复点击
-            # 停止工作线程
-            self.worker.terminate()
-            self.worker.wait()
+        if self.compress_worker and self.compress_worker.isRunning():
+            self.log_widget.log("正在取消压缩...", "WARNING")
+            self.cancel_button.setEnabled(False)
+            self.compress_worker.cancel()
+            self.compress_worker.wait()
+            self.compress_worker = None
             
             # 更新UI
             self.start_button.setEnabled(True)
-            self.cancel_button.setEnabled(True)
             self.progress.setValue(0)
-            self.original_info_label.setText(f"{self.original_info_label.text()}\n\n已取消压缩")
-            self.compressed_info_label.setText(f"{self.compressed_info_label.text()}\n\n已取消压缩")
-            
-            # 清理临时文件
-            if hasattr(self.worker, 'output_path') and os.path.exists(self.worker.output_path):
-                try:
-                    os.remove(self.worker.output_path)
-                    print(f"已删除临时文件: {self.worker.output_path}")
-                except Exception as e:
-                    print(f"删除临时文件失败: {str(e)}")
-                    pass
+            self.log_widget.log("已取消压缩", "INFO")
 
     def select_output_file(self):
         """选择输出文件"""

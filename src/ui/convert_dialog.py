@@ -5,16 +5,22 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor, QBrush
 import os
 import subprocess
+from .log_widget import LogWidget
+from typing import List
+import av
+from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 
 class ConvertWorker(QThread):
-    progress = pyqtSignal(int, str, str)  # 进度值, 当前处理的文件名, 状态信息
+    progress = pyqtSignal(int)  # 总进度
+    file_completed = pyqtSignal(int)  # 已完成的文件数
     finished = pyqtSignal(bool, str)
+    log_message = pyqtSignal(str, str)
     
-    def __init__(self, input_files, output_dir):
+    def __init__(self, input_files: List[str], output_dir: str):
         super().__init__()
         self.input_files = input_files
         self.output_dir = output_dir
-        self.process = None
         self.is_cancelled = False
     
     def run(self):
@@ -22,83 +28,96 @@ class ConvertWorker(QThread):
             total_files = len(self.input_files)
             converted_count = 0
             
+            # 顺序处理每个文件
             for i, input_file in enumerate(self.input_files):
                 if self.is_cancelled:
                     break
                 
-                # 获取输出文件名
-                filename = os.path.splitext(os.path.basename(input_file))[0]
-                output_path = os.path.join(self.output_dir, f"{filename}.mp3")
-                
-                # 更新状态：开始转换当前文件
-                status = f"正在转换: {filename} ({i+1}/{total_files})"
-                self.progress.emit(int((i * 100) / total_files), filename, status)
-                
-                # 构建 FFmpeg 命令
-                command = [
-                    'ffmpeg', '-y',
-                    '-i', input_file,
-                    '-vn',
-                    '-acodec', 'libmp3lame',
-                    '-ab', '192k',
-                    '-ar', '44100',
-                    '-ac', '2',
-                    output_path
-                ]
-                
-                print(f"执行命令: {' '.join(command)}")
-                
-                try:
-                    # 执行转换
-                    process = subprocess.run(
-                        command,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        encoding='utf-8',
-                        errors='replace'
-                    )
-                    
-                    # 检查转换结果
-                    if process.returncode == 0 and os.path.exists(output_path):
-                        converted_count += 1
-                        # 发送完成信号
-                        progress = int(((i + 1) * 100) / total_files)
-                        self.progress.emit(progress, filename, f"完成:{filename}")
-                    else:
-                        print(f"转换失败: {input_file}")
-                        print(f"错误输出: {process.stderr}")
-                        self.progress.emit(int((i + 1) * 100 / total_files), filename, f"失败:{filename}")
-                
-                except Exception as e:
-                    print(f"转换出错: {str(e)}")
-                    self.progress.emit(int((i + 1) * 100 / total_files), filename, f"失败:{filename}")
+                # 转换单个文件
+                if self.convert_file(input_file, i, total_files):
+                    converted_count += 1
+                    # 发送已完成文件数
+                    self.file_completed.emit(converted_count)
+                else:
+                    # 如果转换失败，继续处理下一个文件
+                    continue
             
-            # 检查是否所有文件都转换成功
-            if converted_count == total_files:
-                self.finished.emit(True, "所有文件转换完成")
+            if self.is_cancelled:
+                self.finished.emit(False, "已取消转换")
             else:
-                self.finished.emit(True, f"完成 {converted_count}/{total_files} 个文件的转换")
+                self.finished.emit(
+                    converted_count == total_files,
+                    f"完成 {converted_count}/{total_files} 个文件的转换"
+                )
             
         except Exception as e:
-            print(f"转换过程出错: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            self.log_message.emit(f"转换过程出错: {str(e)}", "ERROR")
             self.finished.emit(False, str(e))
 
+    def convert_file(self, input_file: str, index: int, total_files: int) -> bool:
+        try:
+            filename = os.path.splitext(os.path.basename(input_file))[0]
+            output_path = os.path.join(self.output_dir, f"{filename}.mp3")
+            
+            self.log_message.emit(f"开始转换：{filename}", "INFO")
+            
+            # 创建 startupinfo 对象来隐藏命令行窗口
+            startupinfo = None
+            if os.name == 'nt':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+            
+            # 构建 FFmpeg 命令
+            command = [
+                'ffmpeg', '-y',
+                '-hide_banner',
+                '-i', input_file,
+                '-acodec', 'libmp3lame',
+                '-ab', '192k',
+                output_path
+            ]
+            
+            # 执行转换
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                startupinfo=startupinfo,
+                encoding='utf-8',
+                errors='ignore'
+            )
+            
+            # 等待转换完成
+            stdout, stderr = process.communicate()
+            
+            if process.returncode == 0:
+                progress = int(((index + 1) * 100) / total_files)
+                self.progress.emit(progress)  # 发送总进度
+                self.log_message.emit(f"转换完成：{filename}", "INFO")
+                return True
+            else:
+                self.log_message.emit(f"转换失败：{stderr}", "ERROR")
+                return False
+                
+        except Exception as e:
+            self.log_message.emit(f"转换 {filename} 失败: {str(e)}", "ERROR")
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except:
+                    pass
+            return False
+
     def terminate(self):
+        """终止转换"""
         self.is_cancelled = True
-        if self.process:
-            print("正在终止FFmpeg进程...")
-            self.process.terminate()
-            self.process.wait()
-            print("FFmpeg进程已终止")
         super().terminate()
 
 class ConvertDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("音频转换 - 音视频处理工作台")
+        self.setWindowTitle("音视频处理工作台 - 音频转换")
         self.setMinimumSize(600, 400)
         
         # 初始化变量
@@ -155,7 +174,13 @@ class ConvertDialog(QDialog):
         lists_layout.addWidget(input_list_container)
         lists_layout.addWidget(output_list_container)
         
+        # 将文件列表布局添加到主布局
         layout.addLayout(lists_layout)
+        
+        # 添加日志组件
+        self.log_widget = LogWidget()
+        layout.addWidget(self.log_widget)
+        self.log_widget.setFixedHeight(150)
         
         # 在进度条之前添加输出目录选择
         output_settings = QWidget()
@@ -255,15 +280,20 @@ class ConvertDialog(QDialog):
         self.cancel_button.setObjectName("cancel_button")
         self.back_button.setObjectName("back_button")
         
+        # 添加按钮到布局
         button_layout.addWidget(self.start_button)
         button_layout.addWidget(self.cancel_button)
         button_layout.addWidget(self.back_button)
         layout.addLayout(button_layout)
         
-        # 连接信号
+        # 连接按钮信号
         self.start_button.clicked.connect(self.start_convert)
         self.cancel_button.clicked.connect(self.cancel_convert)
         self.back_button.clicked.connect(self.reject)
+        
+        # 设置按钮初始状态
+        self.start_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
         
         # 设置拖放
         self.setAcceptDrops(True)
@@ -281,88 +311,184 @@ class ConvertDialog(QDialog):
     
     def select_output_dir(self):
         """选择输出目录"""
+        # 先检查是否有选择文件
+        if not self.input_files:
+            QMessageBox.warning(
+                self,
+                "提示",
+                "请先选择音频文件",
+                QMessageBox.StandardButton.Ok
+            )
+            return
+
         dir_path = QFileDialog.getExistingDirectory(
             self,
             "选择输出目录",
-            "",
-            QFileDialog.Option.ShowDirsOnly
+            os.path.dirname(self.input_files[0]) if self.input_files else ""
         )
         if dir_path:
+            # 检查是否选择了输入文件所在目录
+            if any(os.path.dirname(f) == dir_path for f in self.input_files):
+                QMessageBox.warning(
+                    self,
+                    "警告",
+                    "不建议选择输入文件所在目录作为输出目录，这可能会覆盖原文件。\n建议选择其他目录。",
+                    QMessageBox.StandardButton.Ok
+                )
             self.output_dir_edit.setText(dir_path)
 
     def add_files(self, files):
         """添加文件到列表"""
         for file_path in files:
             if file_path not in self.input_files:
+                self.log_widget.log(f"添加文件：{file_path}")
                 self.input_files.append(file_path)
                 # 添加到输入列表
                 self.input_list.addItem(os.path.basename(file_path))
                 # 添加到输出列表（显示转换后的文件名）
                 output_name = os.path.splitext(os.path.basename(file_path))[0] + ".mp3"
-                self.output_list.addItem(output_name)  # 直接添加文件名，不设置颜色
+                self.output_list.addItem(output_name)
         
-        # 设置默认输出目录为第一个文件所在目录下的 converted 文件夹
-        if self.input_files:
-            first_file_dir = os.path.dirname(self.input_files[0])
-            default_output_dir = os.path.join(first_file_dir, "converted_audio")
-            # 创建输出目录（如果不存在）
-            if not os.path.exists(default_output_dir):
-                os.makedirs(default_output_dir)
-            self.output_dir_edit.setText(default_output_dir)
-        
-        # 启用相关控件
+        # 启用输出目录选择按钮
         self.output_dir_button.setEnabled(True)
-        self.start_button.setEnabled(len(self.input_files) > 0)
-    
+        # 清空输出目录
+        self.output_dir_edit.clear()
+        self.output_dir_edit.setPlaceholderText("请选择输出目录")
+        # 只要有输入文件就启用开始按钮
+        self.start_button.setEnabled(True)
+
     def start_convert(self):
         """开始转换"""
-        if not self.input_files:
-            return
-        
-        # 检查输出目录
-        output_dir = self.output_dir_edit.text()
-        if not output_dir:
-            QMessageBox.warning(self, "警告", "请选择输出目录")
-            return
-        
-        # 开始转换
-        self.progress.setValue(0)
-        self.start_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)
-        
-        self.worker = ConvertWorker(self.input_files, output_dir)
-        self.worker.progress.connect(self.update_progress)
-        self.worker.finished.connect(self.conversion_finished)
-        self.worker.start()
-    
-    def update_progress(self, value, filename, status):
-        """更新进度和状态"""
+        try:
+            if not self.input_files:
+                QMessageBox.warning(
+                    self,
+                    "提示",
+                    "请先选择音频文件",
+                    QMessageBox.StandardButton.Ok
+                )
+                return
+            
+            # 检查输出目录
+            output_dir = self.output_dir_edit.text().strip()
+            if not output_dir:
+                QMessageBox.warning(
+                    self,
+                    "提示",
+                    "请选择输出目录",
+                    QMessageBox.StandardButton.Ok
+                )
+                return
+            
+            # 检查输出目录是否存在
+            if not os.path.exists(output_dir):
+                reply = QMessageBox.question(
+                    self,
+                    "提示",
+                    "输出目录不存在，是否创建？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    try:
+                        os.makedirs(output_dir)
+                    except Exception as e:
+                        QMessageBox.critical(
+                            self,
+                            "错误",
+                            f"创建目录失败：{str(e)}",
+                            QMessageBox.StandardButton.Ok
+                        )
+                        return
+                else:
+                    return
+            
+            # 检查输出文件是否已存在
+            existing_files = []
+            for file_path in self.input_files:
+                output_name = os.path.splitext(os.path.basename(file_path))[0] + ".mp3"
+                output_path = os.path.join(output_dir, output_name)
+                if os.path.exists(output_path):
+                    existing_files.append(output_name)
+            
+            if existing_files:
+                msg = "以下文件已存在，是否覆盖？\n\n" + "\n".join(existing_files)
+                reply = QMessageBox.question(
+                    self,
+                    "确认覆盖",
+                    msg,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    return
+            
+            total_files = len(self.input_files)
+            self.log_widget.log(f"开始转换 {total_files} 个文件")
+            self.log_widget.log(f"输出目录：{output_dir}")
+            
+            # 重置进度条和状态
+            self.progress.setValue(0)
+            self.status_label.setText(f"正在转换 (0/{total_files})")
+            self.start_button.setEnabled(False)
+            self.cancel_button.setEnabled(True)
+            
+            # 创建并启动工作线程
+            self.worker = ConvertWorker(self.input_files, output_dir)
+            self.worker.progress.connect(self.update_progress)
+            self.worker.file_completed.connect(self.update_completed_files)
+            self.worker.finished.connect(self.conversion_finished)
+            self.worker.log_message.connect(self.log_widget.log)
+            self.worker.start()
+            
+        except Exception as e:
+            self.log_widget.log(f"启动转换失败：{str(e)}", "ERROR")
+
+    def update_completed_files(self, completed_count: int):
+        """更新已完成文件数"""
+        total_files = len(self.input_files)
+        self.status_label.setText(f"正在转换 ({completed_count}/{total_files})")
+
+    def update_progress(self, value):
+        """更新进度条"""
         self.progress.setValue(value)
-        
-        # 更新状态标签
-        if not status.startswith(("完成:", "失败:")):
-            self.status_label.setText(status)
-    
+
     def conversion_finished(self, success, message):
         """转换完成回调"""
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
+        total_files = len(self.input_files)
         
         if success:
-            self.status_label.setText(message)
-            QMessageBox.information(self, "完成", message)
+            self.progress.setValue(100)
+            self.status_label.setText(f"转换完成 ({total_files}/{total_files})")
+            self.log_widget.log("所有文件转换完成", "INFO")
         else:
             self.status_label.setText(f"转换失败：{message}")
-            QMessageBox.warning(self, "错误", f"转换失败：{message}")
-        
-        self.progress.setValue(0)
-    
+            self.log_widget.log(f"转换失败：{message}", "ERROR")
+
     def cancel_convert(self):
         """取消转换"""
         if self.worker and self.worker.isRunning():
+            self.log_widget.log("正在取消转换...", "WARNING")
+            self.cancel_button.setEnabled(False)
             self.worker.terminate()
             self.worker.wait()
+            self.worker = None
             
+            # 更新UI状态
             self.start_button.setEnabled(True)
             self.cancel_button.setEnabled(False)
-            self.progress.setValue(0) 
+            # 取消时不重置进度条，保持当前进度
+            self.status_label.setText("转换已取消")
+            self.log_widget.log("已取消转换", "INFO")
+            
+            # 移除这里的 self.reject() 或 self.close() 调用 
+
+    def show_error_message(self, message: str) -> None:
+        """显示错误消息"""
+        self.log_widget.log(message, "ERROR")
+    
+    def show_success_message(self) -> None:
+        """显示成功消息"""
+        self.log_widget.log("转换完成", "INFO") 
