@@ -1,0 +1,14 @@
+2025-02-23 17:21:30,338 - ERROR - Î´²¶»ñµÄÒì³£:
+Traceback (most recent call last):
+  File "D:\123123\src\main.py", line 51, in <module>
+    from main_window import MainWindow
+  File "D:\123123\src\main_window.py", line 6, in <module>
+    from ui.compress_dialog import CompressDialog
+  File "D:\123123\src\ui\compress_dialog.py", line 6, in <module>
+    from video_tools.compressor import VideoCompressor
+  File "D:\123123\src\video_tools\compressor.py", line 1, in <module>
+    import av
+ModuleNotFoundError: No module named 'av'
+
+2025-02-23 17:25:55,683 - WARNING - Some options were not used: {'c:v': 'libx264', 'preset': 'fast', 'tune': 'film', 'crf': '18', 'profile:v': 'high'}
+2025-02-23 18:10:18,411 - WARNING - Some options were not used: {'c:v': 'libx264', 'preset': 'fast', 'tune': 'film', 'crf': '18', 'profile:v': 'high'}

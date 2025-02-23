@@ -1,11 +1,29 @@
 from datetime import datetime
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QPushButton, 
                              QMessageBox, QMenuBar, QMenu, QVBoxLayout, QLabel)
-from PyQt6.QtGui import QColor, QPalette, QAction
-from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QPoint, QTimer
+from PyQt6.QtGui import QColor, QPalette, QAction, QEnterEvent
+from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QPoint, QTimer, QEvent
+from typing import cast, Optional
 from ui.compress_dialog import CompressDialog
 from ui.split_dialog import SplitDialog
 from ui.convert_dialog import ConvertDialog
+
+class AnimatedButton(QPushButton):
+    def __init__(self, text: str, parent: Optional[QWidget] = None):
+        super().__init__(text, parent)
+        self._main_window = parent
+    
+    def enterEvent(self, event: QEnterEvent) -> None:
+        """鼠标进入事件"""
+        if self._main_window and isinstance(self._main_window, MainWindow):
+            self._main_window.animate_button(self, -10)
+        super().enterEvent(event)
+    
+    def leaveEvent(self, event: QEvent) -> None:
+        """鼠标离开事件"""
+        if self._main_window and isinstance(self._main_window, MainWindow):
+            self._main_window.animate_button(self, 10)
+        super().leaveEvent(event)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -123,10 +141,9 @@ class MainWindow(QMainWindow):
             feature_layout.setContentsMargins(0, 0, 0, 0)
             
             # 创建按钮
-            btn = QPushButton(text)
+            btn = AnimatedButton(text, self)
+            btn.setFixedSize(200, 200)
             btn.clicked.connect(self.on_button_click)
-            btn.enterEvent = lambda e, b=btn: self.on_button_enter(e, b)
-            btn.leaveEvent = lambda e, b=btn: self.on_button_leave(e, b)
             feature_layout.addWidget(btn)
             self.buttons.append(btn)
             
@@ -159,9 +176,18 @@ class MainWindow(QMainWindow):
         # 启动入场动画
         QTimer.singleShot(100, self.start_entrance_animation)
     
-    def on_button_click(self):
-        """按钮点击事件处理"""
-        sender = self.sender()
+    def animate_button(self, button: QPushButton, y_offset: int) -> None:
+        """按钮动画"""
+        anim = QPropertyAnimation(button, b"pos", self)
+        anim.setDuration(100)
+        anim.setStartValue(button.pos())
+        anim.setEndValue(QPoint(button.x(), button.y() + y_offset))
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.start()
+    
+    def on_button_click(self) -> None:
+        """按钮点击事件"""
+        sender = cast(QPushButton, self.sender())
         if sender:
             if sender.text() == "视频压缩":
                 self.show_compress_dialog()
@@ -196,30 +222,12 @@ class MainWindow(QMainWindow):
             # 延迟启动每个按钮的动画
             QTimer.singleShot(i * 100, anim.start)
     
-    def on_button_enter(self, event, button):
-        """鼠标进入按钮时的动画"""
-        anim = QPropertyAnimation(button, b"pos")
-        anim.setDuration(150)
-        anim.setStartValue(QPoint(button.x(), button.y()))
-        anim.setEndValue(QPoint(button.x(), button.y() - 10))
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        anim.start()
-    
-    def on_button_leave(self, event, button):
-        """鼠标离开按钮时的动画"""
-        anim = QPropertyAnimation(button, b"pos")
-        anim.setDuration(150)
-        anim.setStartValue(QPoint(button.x(), button.y()))
-        anim.setEndValue(QPoint(button.x(), button.y() + 10))
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        anim.start()
-    
-    def create_menu_bar(self):
+    def create_menu_bar(self) -> None:
         """创建菜单栏"""
-        menubar = self.menuBar()
+        menubar = cast(QMenuBar, self.menuBar())
         
         # 工具菜单
-        tools_menu = menubar.addMenu("工具")
+        tools_menu = cast(QMenu, menubar.addMenu("工具"))
         
         # 视频压缩
         compress_action = QAction("视频压缩", self)
@@ -245,7 +253,9 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(exit_action)
         
         # 帮助菜单
-        about_menu = menubar.addMenu("关于")
+        about_menu = cast(QMenu, menubar.addMenu("关于"))
+        if about_menu is None:
+            return
         
         # 关于
         about_action = QAction("关于", self)

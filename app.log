@@ -1,0 +1,8 @@
+2025-02-24 00:50:29,568 - INFO - main.py:37 - setup_logging - 日志系统初始化完成
+2025-02-24 00:50:29,569 - INFO - main.py:38 - setup_logging - Python 版本: 3.13.1 (tags/v3.13.1:0671451, Dec  3 2024, 19:06:28) [MSC v.1942 64 bit (AMD64)]
+2025-02-24 00:50:29,569 - INFO - main.py:39 - setup_logging - 运行路径: D:\123123
+2025-02-24 00:50:29,569 - INFO - main.py:60 - main - 应用程序启动
+2025-02-24 00:50:29,678 - INFO - main.py:87 - main - 已加载应用程序图标: d:\123123\src\resources\icons\app.ico
+2025-02-24 00:50:29,769 - INFO - main.py:94 - main - 主窗口已显示
+2025-02-24 00:50:58,015 - INFO - compressor.py:317 - has_nvidia_gpu - 未找到 pynvml 模块，将使用 CPU 编码
+2025-02-24 00:50:58,016 - INFO - compressor.py:317 - has_nvidia_gpu - 未找到 pynvml 模块，将使用 CPU 编码

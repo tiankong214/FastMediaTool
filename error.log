@@ -1,0 +1,14 @@
+
+Traceback (most recent call last):
+  File "d:\123123\src\ui\split_dialog.py", line 251, in start_split
+    output_dir = self.output_dir_edit.text()
+                 ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SplitDialog' object has no attribute 'output_dir_edit'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "d:\123123\src\ui\split_dialog.py", line 281, in start_split
+    self.show_error_message(f"分割失败：{str(e)}")
+    ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SplitDialog' object has no attribute 'show_error_message'

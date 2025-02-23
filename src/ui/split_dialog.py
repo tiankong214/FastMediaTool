@@ -273,12 +273,30 @@ class SplitDialog(QDialog):
         try:
             if not self.current_file:
                 self.log_widget.log("请先选择视频文件", "WARNING")
+                QMessageBox.warning(
+                    self,
+                    "提示",
+                    "请先选择视频文件",
+                    QMessageBox.StandardButton.Ok
+                )
                 return
             
             # 检查输出目录
             output_dir = self.output_dir_edit.text()
             if not output_dir:
                 self.log_widget.log("请选择输出目录", "WARNING")
+                # 添加弹窗提示
+                msg_box = QMessageBox(
+                    QMessageBox.Icon.Warning,
+                    "提示",
+                    "请先选择输出目录",
+                    QMessageBox.StandardButton.Ok,
+                    self
+                )
+                # 设置按钮文本
+                ok_button = msg_box.button(QMessageBox.StandardButton.Ok)
+                ok_button.setText("确定")
+                msg_box.exec()
                 return
             
             # 禁用开始按钮，启用取消按钮

@@ -1,0 +1,11 @@
+
+Traceback (most recent call last):
+  File "D:\123123\src\main.py", line 51, in <module>
+    from main_window import MainWindow
+  File "D:\123123\src\main_window.py", line 6, in <module>
+    from ui.compress_dialog import CompressDialog
+  File "D:\123123\src\ui\compress_dialog.py", line 6, in <module>
+    from video_tools.compressor import VideoCompressor
+  File "D:\123123\src\video_tools\compressor.py", line 1, in <module>
+    import av
+ModuleNotFoundError: No module named 'av'

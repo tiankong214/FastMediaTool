@@ -1,20 +1,30 @@
 from PyQt6 import QtWidgets
 from PyQt6.QtWidgets import (QLabel, QHBoxLayout, QVBoxLayout, QWidget, 
                             QPushButton, QSlider, QStyle, QSizePolicy)
-from PyQt6.QtCore import Qt, QTimer, QSize
+from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QIcon, QColor, QMouseEvent
 import cv2
+from typing import Optional, Callable
 
 class ClickableLabel(QLabel):
-    def __init__(self, parent=None):
+    clicked = pyqtSignal()
+    
+    def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.click_handler = None
-
-    def mousePressEvent(self, ev: QMouseEvent) -> None:
-        if self.click_handler:
-            self.click_handler(ev)
-        else:
-            super().mousePressEvent(ev)
+        self._click_handler: Optional[Callable[[QMouseEvent], None]] = None
+    
+    @property
+    def click_handler(self) -> Optional[Callable[[QMouseEvent], None]]:
+        return self._click_handler
+    
+    @click_handler.setter
+    def click_handler(self, handler: Optional[Callable[[QMouseEvent], None]]) -> None:
+        self._click_handler = handler
+    
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self._click_handler:
+            self._click_handler(event)
+        self.clicked.emit()
 
 class VideoPreview(QWidget):
     def __init__(self, parent=None):
