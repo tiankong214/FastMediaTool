@@ -1,19 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
-
-datas = [('D:\\123123\\resources', 'resources'), ('D:\\123123\\src\\resources', 'resources')]
-binaries = []
-hiddenimports = ['PIL', 'cv2', 'PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets', 'PyQt6.sip', 'moviepy', 'moviepy.editor', 'proglog', 'tqdm', 'decorator', 'imageio', 'imageio_ffmpeg', 'ui', 'video_tools']
-tmp_ret = collect_all('moviepy')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['D:\\123123\\src\\main.py'],
-    pathex=['D:\\123123\\src'],
-    binaries=binaries,
-    datas=datas,
-    hiddenimports=hiddenimports,
+    ['d:\\123123\\src\\main.py'],
+    pathex=['d:\\123123\\src'],
+    binaries=[],
+    datas=[('resources/ffmpeg.exe', '.'), ('resources/ffprobe.exe', '.'), ('resources/avcodec-61.dll', '.'), ('resources/avdevice-61.dll', '.'), ('resources/avfilter-10.dll', '.'), ('resources/avformat-61.dll', '.'), ('resources/avutil-59.dll', '.'), ('resources/postproc-58.dll', '.'), ('resources/swresample-5.dll', '.'), ('resources/swscale-8.dll', '.'), ('resources/icon.ico', 'resources'), ('src/resources', 'resources'), ('src/version.py', '.')],
+    hiddenimports=['PIL', 'cv2', 'PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets', 'PyQt6.sip', 'moviepy', 'moviepy.editor', 'proglog', 'tqdm', 'decorator', 'imageio', 'imageio_ffmpeg', 'ui', 'video_tools', 'version', 'typing', 'src.ui', 'src.ui.main_window', 'src.video_tools', 'src.utils'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -39,7 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['D:\\123123\\src\\resources\\icons\\app.ico'],
+    icon=['resources\\icon.ico'],
 )
 coll = COLLECT(
     exe,

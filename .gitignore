@@ -20,20 +20,31 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual Environment
-venv/
-ENV/
-env/
+# PyInstaller
+build/
+dist/
+*.manifest
+*.spec
+
+# Logs
+*.log
+build_error.log
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
-.project
-.pydevproject
-.settings
 
-# OS
-.DS_Store
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Windows
 Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
